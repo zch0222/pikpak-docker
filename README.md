@@ -2,7 +2,7 @@
 
 在没有显示器的 Linux 服务器上，用 Docker + Wine 运行 PikPak 官方 Windows 客户端，通过浏览器（noVNC）操作；可以让客户端的全部流量经过 v2ray。
 
-> **开发中**：还有已知问题没修完，当前进度和待办见 [PROGRESS.md](PROGRESS.md)。
+> **开发中**：已知问题已修复，但还没有用真实客户端重新构建验证；当前进度和待办见 [PROGRESS.md](PROGRESS.md)。
 
 PikPak 官方只有 Windows 和 macOS 客户端，没有 Linux 版。这里沿用 [life115-docker](../life115-docker) 的结构，把其中的 115 Linux 客户端换成"Wine + PikPak Windows 客户端"，网络容器和 v2ray 代理原样保留。
 
@@ -32,6 +32,7 @@ compose 里有两个容器：
 - **客户端**：官方安装包是 electron-builder 打的 NSIS 包，程序本体在里面的 `$PLUGINSDIR/app-64.7z`。构建时直接解压到 `/opt/pikpak`，不运行安装器。客户端是 Electron 43（Chromium 150），主程序和它带的迅雷下载组件全是 64 位。
 - **Wine**：WineHQ 11.0 稳定版，只装 64 位部分。WineHQ 的 `wine-stable` 包硬性依赖 32 位的 `wine-stable-i386`，这里用一个空包顶替，省掉整套 i386 库。Wine 的 Windows 库带着调试信息，构建时去掉，从约 765 MB 降到约 240 MB。
 - **重排 exe/dll**（`build/pe-realign.py`）：客户端的 exe 和 dll 在文件里按 512 字节对齐，Wine 遇到这种文件没法 mmap，只能把整个文件读进每个进程自己的内存。主程序 230 MB，主进程、渲染进程、网络进程、crashpad 各复制一份，多占约 1 GB。构建时把它们重新排成按 4 KB 对齐，Wine 就能直接映射文件，各进程共享同一份页缓存，代码和数据不变。数字签名随之失效，Wine 不校验签名。
+- **精简依赖**：Ubuntu 的 noVNC、Xvfb 包硬性依赖 Node.js、Mesa（软件 OpenGL，连带整个 LLVM）等用不到的东西，构建时用空包顶替（`build/apt-stub.sh`），基础软件包从 746 MB 降到 282 MB。客户端加了 `--disable-gpu`，有没有 OpenGL 都只用软件渲染；日志里 Wine 报的几行 OpenGL/D3D 初始化失败可以忽略。
 - **虚拟桌面**：Wine 的 `shell` 虚拟桌面铺满整个屏幕，自带任务栏和托盘，所以不需要窗口管理器。客户端点关闭时会缩到托盘，点右下角的托盘图标就能找回来。
 - **中文**：客户端界面由 Chromium 渲染，直接使用 Noto CJK 字体。窗口标题和任务栏由 Wine 用 Windows 系统字体（Tahoma 等）绘制，这些字体里没有中文；启动时通过字体链接让它们缺字时回退到 Noto CJK。
 
@@ -103,6 +104,8 @@ compose 里有两个容器：
 
 重启客户端时，会先把整个 Wine 会话清掉（包括上一轮遗留的子进程），再重新启动。
 
+客户端的日志在容器的 `/tmp/log/pikpak.log`（内存盘）。超过 20 MB 时转存为 `pikpak.log.1` 再清空，最多占用约 40 MB 内存。
+
 ## v2ray 代理
 
 打开后，客户端的全部网络连接（登录、上传、下载、界面里的网页）都经过 v2ray。这是透明代理，不需要在客户端里设置代理；客户端登录页右上角的"代理"选项不用填，两边都设反而容易出问题。
@@ -153,9 +156,19 @@ DNS 虽然在本地解析，但 v2ray 会从连接里识别出域名（sniffing�
 ### 日常操作
 
 - 改了 `v2ray.json`：执行 `scripts/ppctl.sh restart v2ray`，只重新加载 v2ray，客户端不断开。配置有错误时，日志里会说明原因；改好后几秒内自动恢复。
-- 查看 v2ray 日志：`scripts/ppctl.sh logs v2ray`。每个连接都会记一行访问日志，比如 `accepted tcp:… [proxy]`，可以确认流量确实走了代理。日志最多保留 30 MB。
+- 查看 v2ray 日志：`scripts/ppctl.sh logs v2ray`。每个连接都会记一行访问日志，比如 `accepted tcp:… [proxy]`，可以确认流量确实走了代理。这里记的是客户端解析出的 IP，域名要在节点那边的日志里看。日志最多保留 30 MB。
 - **不要单独重启 `pikpak-net` 容器**：客户端容器用的是它的网络，它一重启，客户端容器就只剩本机回环、彻底断网。要重启就用 `scripts/ppctl.sh restart all` 或 `docker compose restart`。
 - 开启代理时，客户端会等 v2ray 就绪后才启动。
+
+### 测试
+
+`scripts/test-v2ray.sh` 在本机临时起一个 v2ray 服务端和一个代替外网服务器的小网站，检查上面的规则是否生效。只用网络容器的镜像（没有的话先 `docker compose build net`），不需要客户端镜像和真实节点，也不影响正在运行的容器，十几秒跑完：
+
+```bash
+scripts/test-v2ray.sh
+```
+
+它检查：TCP 连接经过服务端；PikPak 的域名（HTTP 的 Host、HTTPS 的 SNI）原样交给服务端解析；内网地址直连；DNS 正常；UDP 被拒绝；服务端停掉、v2ray 停止时客户端断网，恢复后自动恢复联网。
 
 ## 配置项（`.env`）
 
@@ -187,7 +200,13 @@ DNS 虽然在本地解析，但 v2ray 会从连接里识别出域名（sniffing�
 
 ### 已验证
 
-2026-10-06 用 PikPak 2.15.2、Wine 11.0 在 Docker Desktop（WSL2，amd64）上测试：
+v2ray 代理（2026-10-06，v2ray 5.53.0，`scripts/test-v2ray.sh` 全部通过）：
+
+- 客户端的 TCP 连接全部经过节点；PikPak 的域名由节点解析，客户端这边的解析结果不影响去向。
+- 访问内网地址直连，DNS 正常，UDP 被拒绝。
+- 节点连不上、v2ray 停止（配置文件不见了）时客户端断网，不会退回直连；恢复后几秒内自动恢复联网。`ppctl.sh restart v2ray` 能重新加载配置。
+
+客户端（2026-10-06 用 PikPak 2.15.2、Wine 11.0 在 Docker Desktop（WSL2，amd64）上测试）：
 
 （构建完成后补充）
 
@@ -227,6 +246,7 @@ Dockerfile                 客户端镜像（两阶段：解出客户端 → 运
 docker-compose.yml
 .env.example
 build/
+  apt-stub.sh              用空包顶替用不到的依赖
   install-pikpak.sh        从安装包里解出客户端，调用 pe-realign.py
   pe-realign.py            把 exe/dll 重排成按页对齐
   install-wine.sh          安装 64 位 Wine，去掉调试信息
@@ -242,5 +262,6 @@ rootfs/                    复制进镜像的文件
 scripts/                   在宿主机上执行
   ppctl.sh                 状态、截图、重启、日志
   lib.sh
+  test-v2ray.sh            v2ray 代理的端到端测试
 vendor/                    可选：放本地的 official_PikPak.exe 和 v2ray-linux-64.zip
 ```

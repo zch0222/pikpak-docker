@@ -6,7 +6,11 @@ set -eu
 
 out=${1:-/tmp/screenshot.png}
 tmp="$(mktemp -u /tmp/shot.XXXXXX).png"
-scrot --overwrite "$tmp" >/dev/null
+# sh 没有 pipefail，中间哪一步失败都只能从结果判断
+if ! xwd -root -silent -display "$DISPLAY" | xwdtopnm 2>/dev/null | pnmtopng > "$tmp" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    die "截图失败，X 服务 $DISPLAY 可能没有运行"
+fi
 if [ "$out" = "-" ]; then
     cat "$tmp"
     rm -f "$tmp"

@@ -1,0 +1,15 @@
+#!/bin/sh
+# 限制一个日志文件的大小：每分钟检查一次，超过上限就把内容转存到 <文件>.1，再清空原文件
+# 客户端的日志由 run-pikpak 直接写入（不经过 supervisord，原因见 run-pikpak），supervisord 管不到它的大小；
+# /tmp 是内存盘，不限制的话会一直占内存。写入方用追加模式打开，清空后接着从头写
+# 用法：run-logtrim <文件> <上限 MB>
+set -eu
+file=$1
+max=$(($2 * 1024 * 1024))
+while :; do
+    if [ -f "$file" ] && [ "$(stat -c %s "$file")" -gt "$max" ]; then
+        cp "$file" "$file.1"
+        : > "$file"
+    fi
+    sleep 60
+done
