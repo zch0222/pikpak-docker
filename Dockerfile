@@ -32,20 +32,27 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=
 
-# 虚拟显示器、VNC/noVNC、进程管理、截图工具、中文字体
+# 虚拟显示器、VNC/noVNC、进程管理、截图工具（xwd 和 netpbm）、中文字体
 # 不需要窗口管理器：Wine 的虚拟桌面自己管理窗口，还带任务栏和托盘
+# 先用空包顶替几个用不到的依赖（见 build/apt-stub.sh），这一层从 746 MB 降到 282 MB：
+#   nodejs、python3-novnc：Ubuntu 的 novnc 包依赖它们（构建 noVNC、OpenStack 的 nova 代理），这里只用网页文件和 websockify
+#   python3-numpy：websockify 只用它加速解码浏览器发来的数据，没有也能用
+#   mesa-libgallium：Xvfb 经 libgl1 依赖 Mesa 的软件 OpenGL（连带整个 LLVM）。客户端加了 --disable-gpu，有没有 OpenGL
+#     Chromium 都只用软件渲染；没有它，Wine 启动时会报几行 OpenGL/D3D 初始化失败，GPU 进程还少占约 130 MB 内存
+COPY build/apt-stub.sh /tmp/apt-stub.sh
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i -e "s#http://archive.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
                -e "s#http://security.ubuntu.com/ubuntu#${APT_MIRROR}#g" \
             /etc/apt/sources.list.d/ubuntu.sources; \
     fi \
  && apt-get update \
+ && sh /tmp/apt-stub.sh nodejs python3-novnc python3-numpy mesa-libgallium \
  && apt-get install -y --no-install-recommends \
         ca-certificates curl tzdata locales procps \
         xvfb x11-utils x11vnc novnc websockify \
-        supervisor scrot fonts-noto-cjk \
+        supervisor x11-apps netpbm fonts-noto-cjk \
  && locale-gen zh_CN.UTF-8 \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /tmp/apt-stub.sh
 
 # Wine：WineHQ 的稳定版，只装 64 位部分（见 build/install-wine.sh）
 # 换版本时 WINE_VERSION 要写完整的包版本号，可用的版本见 https://dl.winehq.org/wine-builds/ubuntu/dists/noble/main/binary-amd64/

@@ -32,6 +32,7 @@ compose 里有两个容器：
 - **客户端**：官方安装包是 electron-builder 打的 NSIS 包，程序本体在里面的 `$PLUGINSDIR/app-64.7z`。构建时直接解压到 `/opt/pikpak`，不运行安装器。客户端是 Electron 43（Chromium 150），主程序和它带的迅雷下载组件全是 64 位。
 - **Wine**：WineHQ 11.0 稳定版，只装 64 位部分。WineHQ 的 `wine-stable` 包硬性依赖 32 位的 `wine-stable-i386`，这里用一个空包顶替，省掉整套 i386 库。Wine 的 Windows 库带着调试信息，构建时去掉，从约 765 MB 降到约 240 MB。
 - **重排 exe/dll**（`build/pe-realign.py`）：客户端的 exe 和 dll 在文件里按 512 字节对齐，Wine 遇到这种文件没法 mmap，只能把整个文件读进每个进程自己的内存。主程序 230 MB，主进程、渲染进程、网络进程、crashpad 各复制一份，多占约 1 GB。构建时把它们重新排成按 4 KB 对齐，Wine 就能直接映射文件，各进程共享同一份页缓存，代码和数据不变。数字签名随之失效，Wine 不校验签名。
+- **精简依赖**：Ubuntu 的 noVNC、Xvfb 包硬性依赖 Node.js、Mesa（软件 OpenGL，连带整个 LLVM）等用不到的东西，构建时用空包顶替（`build/apt-stub.sh`），基础软件包从 746 MB 降到 282 MB。客户端加了 `--disable-gpu`，有没有 OpenGL 都只用软件渲染；日志里 Wine 报的几行 OpenGL/D3D 初始化失败可以忽略。
 - **虚拟桌面**：Wine 的 `shell` 虚拟桌面铺满整个屏幕，自带任务栏和托盘，所以不需要窗口管理器。客户端点关闭时会缩到托盘，点右下角的托盘图标就能找回来。
 - **中文**：客户端界面由 Chromium 渲染，直接使用 Noto CJK 字体。窗口标题和任务栏由 Wine 用 Windows 系统字体（Tahoma 等）绘制，这些字体里没有中文；启动时通过字体链接让它们缺字时回退到 Noto CJK。
 
@@ -245,6 +246,7 @@ Dockerfile                 客户端镜像（两阶段：解出客户端 → 运
 docker-compose.yml
 .env.example
 build/
+  apt-stub.sh              用空包顶替用不到的依赖
   install-pikpak.sh        从安装包里解出客户端，调用 pe-realign.py
   pe-realign.py            把 exe/dll 重排成按页对齐
   install-wine.sh          安装 64 位 Wine，去掉调试信息

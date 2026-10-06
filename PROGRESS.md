@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-原来的两个必须修的问题（客户端输出接管道时弹 JavaScript 错误框、字体链接没生效）已经修好，在替身环境里验证过（Wine 10.0 + Electron 33 写的替身程序，见下文"替身环境"）。v2ray 端到端测试通过。
+原来的两个必须修的问题（客户端输出接管道时弹 JavaScript 错误框、字体链接没生效）已经修好，在替身环境里验证过（Wine 10.0 + Electron 33 写的替身程序，见下文"替身环境"）。v2ray 端到端测试通过。基础软件包精简完成（746 MB → 282 MB）。
 
 **还没有用真实客户端重新构建验证**：这次是在云端会话里做的，网络策略拦了 `download.mypikpak.net` 和 `dl.winehq.org`，构建不了正式镜像。下一步见"待办"第 1 条。
 
@@ -19,6 +19,7 @@
 - 字体链接的 REG_MULTI_SZ 改成每字符一个字节、末尾 `00,00`（.reg 没有 BOM，Wine 按 ANSI 读 hex(7)）。
 - `build/install-pikpak.sh` 取 Electron 版本时 `head -n 1`（上一轮已改，随下次构建生效）。
 - `scripts/test-v2ray.sh`：v2ray 透明代理的端到端测试，只用网络容器镜像。
+- 镜像精简（基础软件包部分）：`build/apt-stub.sh` 用空包顶替 `nodejs`、`python3-novnc`、`python3-numpy`、`mesa-libgallium`；截图从 `scrot` 换成 `xwd`（x11-apps）+ netpbm。基础软件包层 746 MB → 282 MB。
 
 ## 实测数据
 
@@ -73,6 +74,25 @@
 - 日志截断：往 `pikpak.log` 追加 21 MB，一分钟内转存为 `pikpak.log.1` 并清空；客户端之后的输出从文件开头接着写（没有空洞，追加模式在 Wine 下有效），两份文件时间上衔接，没有丢行。
 - stdin 改成 `/dev/null` 对客户端没有影响。
 
+### 镜像精简（ubuntu:24.04，2026-10-06）
+
+由正式 Dockerfile 的运行阶段生成、去掉 Wine 的测试镜像，看 `docker history` 里基础软件包那一层：修改前 746 MB（和上面正式镜像的数字一致），修改后 282 MB。
+
+逐项（`du` 测的新增占用，不含 locale 等）：现状 649 MB；scrot 换成 xwd + netpbm 576 MB（完全不装截图工具是 559 MB，只差 17 MB，所以没有另写转换程序）；再顶替 nodejs、python3-novnc 415 MB；再顶替 mesa-libgallium（连带 libllvm20）198 MB；再顶替 python3-numpy 151 MB。
+
+- 空包必须和真包的架构、Multi-Arch 一致并 hold 住：第一次写成 `Architecture: all`，apt 把它当成可升级的旧包，又装回了真的 mesa-libgallium（nodejs 也是）。`apt-stub.sh` 读 apt 的候选版本信息生成控制文件。
+- 运行验证（24.04，不含 Wine）：Xvfb 正常启动（GLX 扩展还在，只是没有 Mesa 后端）；websockify 只多一行"no 'numpy' module, HyBi protocol will be slower"警告；`pikpak-screenshot` 生成正常 PNG；用 Playwright 驱动 Chromium 打开 noVNC，输入密码后显示"Connected"，画面正常。
+- 运行验证（替身环境，Wine 10.0 + Electron 33，同样顶替 mesa-libgallium；26.04 已经没有 python3-novnc，这一项测试时去掉）：Wine 装完后 mesa-libgallium 仍是空包、没有装回 LLVM；客户端画面、中文、noVNC 都正常。和不顶替 Mesa 的同一镜像对比：
+
+  | | 有 Mesa | 无 Mesa |
+  |---|---|---|
+  | `app.getGPUFeatureStatus()` | 全部 software/disabled/unavailable | 完全相同 |
+  | `app.getGPUInfo('basic')` | Wine 模拟的显卡（vendor 0x10DE） | 无 |
+  | 日志里 `err:wgl`/`err:d3d` | 0 行 | 12 行（OpenGL、D3D 初始化失败） |
+  | GPU 进程 RSS | 392 MB | 258 MB |
+
+  也就是说加了 `--disable-gpu` 后，有没有 OpenGL，Chromium 能用的功能都一样。
+
 ### v2ray 端到端测试
 
 `scripts/test-v2ray.sh`（v2ray 5.53.0）15 项全部通过，约 15 秒。服务端是同一镜像里的 v2ray（VMess + WebSocket），"外网"是 198.18.0.0/24 上的 busybox httpd；PikPak 的域名在服务端用 `dns.hosts` 指到这个网站，客户端这边用 `curl --resolve` 解析到不存在的 203.0.113.1。
@@ -86,13 +106,9 @@
 按顺序：
 
 1. **[必须] 重新构建正式镜像，用真实客户端验证。** 需要能访问 `download.mypikpak.net` 和 `dl.winehq.org`。验证：没有 JavaScript 错误框、`/tmp/log/pikpak.log` 里有客户端输出；中文标题/任务栏；`/etc/pikpak-release` 只有两行；`ppctl.sh restart`、`status`、`logs`、`screenshot`、健康检查。
+   精简后的软件包也要在这一步确认：Wine 层安装时 apt 不能要求改动被 hold 的空包（会直接报错）；客户端没有 OpenGL 时登录页、文件列表、视频预览正常。如果视频预览等功能有问题，把 Dockerfile 里 `apt-stub.sh` 那行的 `mesa-libgallium` 去掉即可恢复。
 2. 真实客户端开启代理，看节点日志里有 PikPak 的域名（网络层已由 `scripts/test-v2ray.sh` 验证，这里只是确认客户端本身没有绕开的连接，比如 DownloadServer 的 UDP 被拒后能否正常下载）。
-3. **镜像精简**（估算可省约 550 MB）：
-   - `scrot` → `xwd`（x11-apps）+ netpbm：省 69 MB（scrot 拉进 imlib2、ghostscript、poppler、librsvg）。
-   - Ubuntu 的 `novnc` 依赖 `nodejs`、`python3-novnc`（拉进 babel、iso-codes 等），用空包顶替：约 127 MB。
-   - Xvfb → libgl1 → Mesa（`mesa-libgallium` + `libllvm20`）：约 180 MB；我们不用 OpenGL，可以考虑空包顶替 `mesa-libgallium`，要验证 Xvfb 不受影响。
-   - WineHQ 硬依赖的扫描仪/相机/ALSA 插件（`libsane1`、`libgphoto2-*`、`libasound2-plugins`，后者拉进整套 ffmpeg）：约 180 MB，用空包顶替。
-   - 空包的做法和 `install-wine.sh` 里顶替 `wine-stable-i386` 相同，版本取 apt 的候选版本。
+3. **镜像精简，Wine 层**（基础软件包部分已完成，见上文）：WineHQ 硬依赖的扫描仪/相机/ALSA 插件（`libsane1`、`libgphoto2-*`、`libasound2-plugins`，后者拉进整套 ffmpeg），估计约 180 MB。在 `install-wine.sh` 里 `apt-get install` 之前用 `build/apt-stub.sh` 顶替（要先加 WineHQ 源并 `apt-get update`，名字以 `apt-cache depends wine-stable-amd64` 为准）。需要能访问 WineHQ 才能做和验证。
 4. README 里"资源占用"和"测试情况/已验证"的客户端部分还是占位，按最终实测补上。
 5. 待验证（README 里也列了）：登录后的上传下载、断网续传、72 小时稳定性、提示升级时的表现、大文件和长文件名。
 
