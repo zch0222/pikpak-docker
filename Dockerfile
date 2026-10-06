@@ -73,6 +73,7 @@ RUN chmod 0755 \
         /usr/local/bin/run-xvfb \
         /usr/local/bin/run-x11vnc \
         /usr/local/bin/run-pikpak \
+        /usr/local/bin/run-logtrim \
         /usr/local/bin/pikpak-screenshot \
         /usr/local/bin/pikpak-status \
  && chmod 0644 /usr/local/lib/pikpak/common.sh /etc/supervisor/pikpak.conf

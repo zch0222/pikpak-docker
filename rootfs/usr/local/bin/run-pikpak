@@ -2,6 +2,12 @@
 # 启动 PikPak 客户端：清掉上一轮遗留的 Wine 进程，准备 Wine 环境，然后运行客户端
 set -eu
 . /usr/local/lib/pikpak/common.sh
+
+# 输出直接写进日志文件，不经过 supervisord 的管道：Electron 的 Node 在 Wine 里打不开管道句柄，
+# 一碰 process.stdout、process.stderr 就报 "Error: open EBADF"，主进程弹出 JavaScript 错误框。普通文件没有这个问题。
+# 日志大小由 run-logtrim 控制；stdin 同样不留管道
+exec </dev/null >>/tmp/log/pikpak.log 2>&1
+
 wait_for_x
 wait_for_proxy
 
@@ -15,11 +21,12 @@ if [ ! -f "$WINEPREFIX/system.reg" ]; then
     wineserver -w
 fi
 
-# REG_MULTI_SZ 在 .reg 文件里写成 UTF-16LE 的十六进制；这里只有 ASCII，每个字节后面补 00
+# REG_MULTI_SZ 写成十六进制。.reg 文件没有 BOM，Wine 按 ANSI 读，hex(7) 里的字节也当 ANSI 字符串转换，
+# 所以每个字符一个字节（不是 UTF-16LE），末尾两个 00：一个结束字符串，一个结束列表
 multi_sz() {
     printf 'hex(7):'
-    printf '%s' "$1" | od -An -tx1 -v | tr -s ' \n' '\n' | grep . | sed 's/$/,00/' | tr '\n' ','
-    printf '00,00,00,00\n'
+    printf '%s' "$1" | od -An -tx1 -v | tr -s ' \n' '\n' | grep . | tr '\n' ','
+    printf '00,00\n'
 }
 
 # 每次启动都写一遍设置，镜像里改了设置、改了分辨率，对已有的 Wine 环境同样生效

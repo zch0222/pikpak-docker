@@ -2,7 +2,7 @@
 
 在没有显示器的 Linux 服务器上，用 Docker + Wine 运行 PikPak 官方 Windows 客户端，通过浏览器（noVNC）操作；可以让客户端的全部流量经过 v2ray。
 
-> **开发中**：还有已知问题没修完，当前进度和待办见 [PROGRESS.md](PROGRESS.md)。
+> **开发中**：已知问题已修复，但还没有用真实客户端重新构建验证；当前进度和待办见 [PROGRESS.md](PROGRESS.md)。
 
 PikPak 官方只有 Windows 和 macOS 客户端，没有 Linux 版。这里沿用 [life115-docker](../life115-docker) 的结构，把其中的 115 Linux 客户端换成"Wine + PikPak Windows 客户端"，网络容器和 v2ray 代理原样保留。
 
@@ -103,6 +103,8 @@ compose 里有两个容器：
 
 重启客户端时，会先把整个 Wine 会话清掉（包括上一轮遗留的子进程），再重新启动。
 
+客户端的日志在容器的 `/tmp/log/pikpak.log`（内存盘）。超过 20 MB 时转存为 `pikpak.log.1` 再清空，最多占用约 40 MB 内存。
+
 ## v2ray 代理
 
 打开后，客户端的全部网络连接（登录、上传、下载、界面里的网页）都经过 v2ray。这是透明代理，不需要在客户端里设置代理；客户端登录页右上角的"代理"选项不用填，两边都设反而容易出问题。
@@ -153,9 +155,19 @@ DNS 虽然在本地解析，但 v2ray 会从连接里识别出域名（sniffing�
 ### 日常操作
 
 - 改了 `v2ray.json`：执行 `scripts/ppctl.sh restart v2ray`，只重新加载 v2ray，客户端不断开。配置有错误时，日志里会说明原因；改好后几秒内自动恢复。
-- 查看 v2ray 日志：`scripts/ppctl.sh logs v2ray`。每个连接都会记一行访问日志，比如 `accepted tcp:… [proxy]`，可以确认流量确实走了代理。日志最多保留 30 MB。
+- 查看 v2ray 日志：`scripts/ppctl.sh logs v2ray`。每个连接都会记一行访问日志，比如 `accepted tcp:… [proxy]`，可以确认流量确实走了代理。这里记的是客户端解析出的 IP，域名要在节点那边的日志里看。日志最多保留 30 MB。
 - **不要单独重启 `pikpak-net` 容器**：客户端容器用的是它的网络，它一重启，客户端容器就只剩本机回环、彻底断网。要重启就用 `scripts/ppctl.sh restart all` 或 `docker compose restart`。
 - 开启代理时，客户端会等 v2ray 就绪后才启动。
+
+### 测试
+
+`scripts/test-v2ray.sh` 在本机临时起一个 v2ray 服务端和一个代替外网服务器的小网站，检查上面的规则是否生效。只用网络容器的镜像（没有的话先 `docker compose build net`），不需要客户端镜像和真实节点，也不影响正在运行的容器，十几秒跑完：
+
+```bash
+scripts/test-v2ray.sh
+```
+
+它检查：TCP 连接经过服务端；PikPak 的域名（HTTP 的 Host、HTTPS 的 SNI）原样交给服务端解析；内网地址直连；DNS 正常；UDP 被拒绝；服务端停掉、v2ray 停止时客户端断网，恢复后自动恢复联网。
 
 ## 配置项（`.env`）
 
@@ -187,7 +199,13 @@ DNS 虽然在本地解析，但 v2ray 会从连接里识别出域名（sniffing�
 
 ### 已验证
 
-2026-10-06 用 PikPak 2.15.2、Wine 11.0 在 Docker Desktop（WSL2，amd64）上测试：
+v2ray 代理（2026-10-06，v2ray 5.53.0，`scripts/test-v2ray.sh` 全部通过）：
+
+- 客户端的 TCP 连接全部经过节点；PikPak 的域名由节点解析，客户端这边的解析结果不影响去向。
+- 访问内网地址直连，DNS 正常，UDP 被拒绝。
+- 节点连不上、v2ray 停止（配置文件不见了）时客户端断网，不会退回直连；恢复后几秒内自动恢复联网。`ppctl.sh restart v2ray` 能重新加载配置。
+
+客户端（2026-10-06 用 PikPak 2.15.2、Wine 11.0 在 Docker Desktop（WSL2，amd64）上测试）：
 
 （构建完成后补充）
 
@@ -242,5 +260,6 @@ rootfs/                    复制进镜像的文件
 scripts/                   在宿主机上执行
   ppctl.sh                 状态、截图、重启、日志
   lib.sh
+  test-v2ray.sh            v2ray 代理的端到端测试
 vendor/                    可选：放本地的 official_PikPak.exe 和 v2ray-linux-64.zip
 ```
