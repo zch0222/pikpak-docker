@@ -1,0 +1,7 @@
+#!/bin/sh
+# 只监听容器内的 127.0.0.1，外部通过 noVNC（websockify）访问
+set -eu
+. /usr/local/lib/pikpak/common.sh
+wait_for_x
+exec x11vnc -display "$DISPLAY" -rfbport 5900 -localhost -forever -shared \
+    -passwdfile "$XDG_RUNTIME_DIR/vncpasswd" -noxdamage -quiet

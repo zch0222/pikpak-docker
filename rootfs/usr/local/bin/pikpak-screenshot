@@ -1,0 +1,16 @@
+#!/bin/sh
+# 截取虚拟显示器的画面
+# 参数是输出文件，默认 /tmp/screenshot.png；"-" 表示把 PNG 写到标准输出
+set -eu
+. /usr/local/lib/pikpak/common.sh
+
+out=${1:-/tmp/screenshot.png}
+tmp="$(mktemp -u /tmp/shot.XXXXXX).png"
+scrot --overwrite "$tmp" >/dev/null
+if [ "$out" = "-" ]; then
+    cat "$tmp"
+    rm -f "$tmp"
+else
+    mv "$tmp" "$out"
+    echo "$out"
+fi

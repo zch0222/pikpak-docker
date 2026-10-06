@@ -1,0 +1,142 @@
+#!/bin/sh
+# 网络容器（pikpak-net）的入口、v2ray 守护和健康检查
+#
+# PikPak 容器用 network_mode: service:net 共用这个容器的网络，这里的防火墙规则对客户端同样生效。
+# V2RAY_ENABLED=true 时：
+#   - 所有 TCP 连接转给 v2ray 的透明代理入站 127.0.0.1:12345，v2ray 自己发出的连接除外
+#   - 访问本机和内网地址的连接不走代理
+#   - 其余出站流量（UDP、ICMP、IPv6）除 DNS 外一律拒绝
+# v2ray 没在运行或配置有误时，客户端连不上网，不会退回直连。
+#
+# 用法：pikpak-net start | health
+#   start      容器入口（root）：设置防火墙规则，然后降权运行 supervise
+#   supervise  以 v2ray 用户作为容器主进程：v2ray 退出后自动重启；收到 HUP 时重新加载 v2ray.json
+#   health     健康检查：开启代理时，透明代理端口必须在监听
+set -eu
+
+CONFIG=/etc/v2ray/v2ray.json
+# v2ray.json 里透明代理入站的端口，PikPak 容器的 common.sh 也按这个端口判断 v2ray 是否就绪
+REDIR_PORT=12345
+DROP_PRIVS="--reuid=v2ray --regid=v2ray --clear-groups"
+LOCAL_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
+LOCAL_V6="::1/128 fc00::/7 fe80::/10 ff00::/8"
+
+log() { printf '%s [net] %s\n' "$(date '+%F %T')" "$*" >&2; }
+
+enabled() {
+    case ${V2RAY_ENABLED:-false} in
+        true | 1 | yes | on) return 0 ;;
+        false | 0 | no | off | '') return 1 ;;
+        *) log "V2RAY_ENABLED 只能是 true 或 false，现在是：$V2RAY_ENABLED"; exit 1 ;;
+    esac
+}
+
+# 新建或清空一条链，并让父链跳到它；重复执行不会叠加规则
+# new_chain <iptables|ip6tables> <表> <父链> <链> [匹配条件...]
+new_chain() {
+    ipt=$1 table=$2 parent=$3 name=$4
+    shift 4
+    $ipt -w -t "$table" -N "$name" 2>/dev/null || $ipt -w -t "$table" -F "$name"
+    $ipt -w -t "$table" -C "$parent" "$@" -j "$name" 2>/dev/null \
+        || $ipt -w -t "$table" -A "$parent" "$@" -j "$name"
+}
+
+# 出站只放行：已建立的连接、本机、内网、v2ray 自己、DNS，其余拒绝
+# guard <iptables|ip6tables> <内网网段>
+guard() {
+    ipt=$1 nets=$2
+    new_chain "$ipt" filter OUTPUT PIKPAK_GUARD
+    $ipt -w -A PIKPAK_GUARD -o lo -j RETURN
+    $ipt -w -A PIKPAK_GUARD -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    $ipt -w -A PIKPAK_GUARD -m owner --uid-owner "$uid" -j RETURN
+    for net in $nets; do
+        $ipt -w -A PIKPAK_GUARD -d "$net" -j RETURN
+    done
+    $ipt -w -A PIKPAK_GUARD -p udp --dport 53 -j RETURN
+    $ipt -w -A PIKPAK_GUARD -p tcp --dport 53 -j RETURN
+    $ipt -w -A PIKPAK_GUARD -j REJECT
+}
+
+setup_firewall() {
+    uid=$(id -u v2ray)
+    log "代理已开启：TCP 连接转给 v2ray（127.0.0.1:$REDIR_PORT），其余出站除 DNS 外全部拒绝"
+
+    new_chain iptables nat OUTPUT PIKPAK_PROXY -p tcp
+    iptables -w -t nat -A PIKPAK_PROXY -m owner --uid-owner "$uid" -j RETURN
+    for net in $LOCAL_V4; do
+        iptables -w -t nat -A PIKPAK_PROXY -d "$net" -j RETURN
+    done
+    iptables -w -t nat -A PIKPAK_PROXY -p tcp -j REDIRECT --to-ports "$REDIR_PORT"
+    guard iptables "$LOCAL_V4"
+
+    # IPv6 不做转发，直接拒绝，让客户端只走 IPv4
+    if ip6tables -w -n -L OUTPUT >/dev/null 2>&1; then
+        guard ip6tables "$LOCAL_V6"
+    else
+        log "ip6tables 不可用，跳过 IPv6 规则（容器没有 IPv6 时属于正常情况）"
+    fi
+}
+
+start() {
+    if ! enabled; then
+        log "代理已关闭，客户端直接联网"
+        # shellcheck disable=SC2086
+        exec setpriv $DROP_PRIVS -- sh -c 'trap "exit 0" TERM INT; while :; do sleep 86400 & wait $!; done'
+    fi
+    setup_firewall
+    # shellcheck disable=SC2086
+    exec setpriv $DROP_PRIVS -- "$0" supervise
+}
+
+supervise() {
+    pid='' stopping='' reload='' problem='' last_problem=''
+    trap 'stopping=1; [ -z "$pid" ] || kill "$pid" 2>/dev/null' TERM INT
+    trap 'reload=1; [ -z "$pid" ] || kill "$pid" 2>/dev/null' HUP
+
+    while [ -z "$stopping" ]; do
+        if [ ! -f "$CONFIG" ]; then
+            problem="找不到 v2ray/v2ray.json，从 v2ray/v2ray.example.json 复制一份并填上节点信息"
+        elif ! out=$(v2ray test -c "$CONFIG" 2>&1); then
+            problem="v2ray.json 有错误：$(printf '%s\n' "$out" | grep -v -e '^V2Ray ' -e '^A unified' | tail -n 3)"
+        else
+            problem='' last_problem='' reload=''
+            v2ray run -c "$CONFIG" &
+            pid=$!
+            # 收到信号时 wait 会提前返回，要等到 v2ray 真正退出
+            while kill -0 "$pid" 2>/dev/null; do
+                wait "$pid" || true
+            done
+            pid=''
+            [ -z "$stopping" ] || break
+            if [ -n "$reload" ]; then
+                log "重新加载 v2ray.json"
+                continue
+            fi
+            log "v2ray 退出了，5 秒后重启"
+        fi
+        # 同样的问题只提示一次；文件改好后下一轮会自动启动 v2ray
+        if [ -n "$problem" ] && [ "$problem" != "$last_problem" ]; then
+            log "客户端暂时无法联网。$problem"
+        fi
+        last_problem=$problem
+        # 等待期间收到 HUP 或 TERM 会立刻继续
+        sleep 5 &
+        wait $! || true
+    done
+}
+
+health() {
+    enabled || exit 0
+    port=$(printf '%04X' "$REDIR_PORT")
+    # /proc/net/tcp*：第 2 列是"本地地址:端口"（十六进制），第 4 列 0A 表示 LISTEN
+    cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+        | awk -v p="$port" '{ n = split($2, a, ":"); if (a[n] == p && $4 == "0A") found = 1 } END { exit !found }' \
+        || { echo "v2ray 没有监听 127.0.0.1:$REDIR_PORT"; exit 1; }
+}
+
+case ${1:-} in
+    start) start ;;
+    supervise) supervise ;;
+    health) health ;;
+    *) echo "用法: $0 start|health" >&2; exit 2 ;;
+esac

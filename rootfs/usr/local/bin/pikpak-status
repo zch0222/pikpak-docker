@@ -1,0 +1,30 @@
+#!/bin/sh
+# 显示虚拟显示器、VNC 和客户端的运行状态
+# -q：不输出，只用退出码表示是否全部正常（HEALTHCHECK 用）
+. /usr/local/lib/pikpak/common.sh
+conf=/etc/supervisor/pikpak.conf
+
+if [ "${1:-}" = "-q" ]; then
+    supervisorctl -c "$conf" status >/dev/null 2>&1 || exit 1
+    client_pid >/dev/null || exit 1
+    exit 0
+fi
+
+. /etc/pikpak-release
+echo "客户端：    PikPak $PIKPAK_VERSION（Electron $ELECTRON_VERSION）"
+echo "Wine：      $(wine --version 2>/dev/null)，环境目录 $WINEPREFIX"
+if pid=$(client_pid); then
+    echo "客户端进程：运行中（pid $pid）"
+else
+    echo "客户端进程：未运行"
+fi
+echo "显示器：    $DISPLAY $SCREEN_GEOMETRY"
+if ! proxy_enabled; then
+    echo "代理：      关闭，直接联网"
+elif proxy_ready; then
+    echo "代理：      开启，v2ray 就绪"
+else
+    echo "代理：      开启，v2ray 未就绪（客户端无法联网，看 pikpak-net 容器的日志）"
+fi
+echo
+supervisorctl -c "$conf" status

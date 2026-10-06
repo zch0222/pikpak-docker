@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+# /tmp 是 tmpfs，每次启动容器都是空的，X 的 socket 目录要自己建
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+# supervisord 保证只有一个 Xvfb，异常退出后留下的锁文件可以直接删
+n=${DISPLAY#:}
+rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}"
+exec Xvfb "$DISPLAY" -screen 0 "$SCREEN_GEOMETRY" -nolisten tcp -dpi 96 +extension RANDR

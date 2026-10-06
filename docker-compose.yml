@@ -1,0 +1,81 @@
+services:
+  # 网络容器：PikPak 容器共用它的网络，noVNC 端口也发布在这里。
+  # V2RAY_ENABLED=true 时，它把客户端的连接全部转给 v2ray（配置在 v2ray/v2ray.json）
+  net:
+    build:
+      context: .
+      dockerfile: net/Dockerfile
+      args:
+        V2RAY_VERSION: ${V2RAY_VERSION:-5.53.0}
+        V2RAY_SHA256: ${V2RAY_SHA256:-}
+        APT_MIRROR: ${APT_MIRROR:-}
+    image: pikpak-docker-net:${V2RAY_VERSION:-5.53.0}
+    container_name: ${PIKPAK_CONTAINER:-pikpak}-net
+    # 共用网络的容器也共用这个主机名
+    hostname: pikpak
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      V2RAY_ENABLED: ${V2RAY_ENABLED:-false}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${NOVNC_BIND:-127.0.0.1}:${NOVNC_PORT:-6082}:6080"
+    volumes:
+      - ./v2ray:/etc/v2ray:ro
+    # v2ray 每个连接记一行访问日志，限制日志大小
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    # NET_ADMIN 用来设置防火墙规则（只影响这组容器自己的网络），SETUID/SETGID 用来降权运行 v2ray
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+
+  pikpak:
+    build:
+      context: .
+      args:
+        PIKPAK_SHA256: ${PIKPAK_SHA256:-}
+        WINE_VERSION: ${WINE_VERSION:-11.0.0.0~noble-1}
+        APT_MIRROR: ${APT_MIRROR:-}
+    image: pikpak-docker:latest
+    container_name: ${PIKPAK_CONTAINER:-pikpak}
+    platform: linux/amd64
+    restart: unless-stopped
+    network_mode: service:net
+    depends_on:
+      net:
+        condition: service_healthy
+    environment:
+      VNC_PASSWORD: ${VNC_PASSWORD:?在 .env 里设置 VNC_PASSWORD}
+      VNC_VIEW_PASSWORD: ${VNC_VIEW_PASSWORD:-}
+      SCREEN_GEOMETRY: ${SCREEN_GEOMETRY:-1600x900x24}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 开启代理时，客户端等 v2ray 就绪后才启动
+      V2RAY_ENABLED: ${V2RAY_ENABLED:-false}
+    volumes:
+      # Wine 环境，里面有客户端的配置和登录状态
+      - pikpak-config:/config
+      # 和客户端交换文件的目录，在 Wine 里是 Z:\data；读写，容器里的 uid 1000 要有写权限才能写入
+      - ${HOST_DATA_DIR:-./data}:/data
+    # Wine 的共享内存（Chromium 进程间通信大量使用）是 /tmp 下的文件，放在内存里，免得写盘
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pikpak-config:

@@ -1,0 +1,56 @@
+#!/bin/sh
+# 启动 PikPak 客户端：清掉上一轮遗留的 Wine 进程，准备 Wine 环境，然后运行客户端
+set -eu
+. /usr/local/lib/pikpak/common.sh
+wait_for_x
+wait_for_proxy
+
+# 客户端崩溃或被重启后，渲染进程、DownloadServer 等子进程可能还在。
+# 新实例发现已有实例会把参数交过去然后自己退出，所以先把整个 Wine 会话清掉
+wineserver -k 2>/dev/null || true
+
+if [ ! -f "$WINEPREFIX/system.reg" ]; then
+    log "第一次运行，创建 Wine 环境（$WINEPREFIX），大约要半分钟"
+    wineboot --init
+    wineserver -w
+fi
+
+# REG_MULTI_SZ 在 .reg 文件里写成 UTF-16LE 的十六进制；这里只有 ASCII，每个字节后面补 00
+multi_sz() {
+    printf 'hex(7):'
+    printf '%s' "$1" | od -An -tx1 -v | tr -s ' \n' '\n' | grep . | sed 's/$/,00/' | tr '\n' ','
+    printf '00,00,00,00\n'
+}
+
+# 每次启动都写一遍设置，镜像里改了设置、改了分辨率，对已有的 Wine 环境同样生效
+reg=$(mktemp /tmp/pikpak-XXXXXX.reg)
+{
+    echo 'Windows Registry Editor Version 5.00'
+    echo
+    # 虚拟桌面：所有窗口都画在一个铺满屏幕的桌面里，带任务栏和托盘（客户端关窗口时缩到托盘）
+    echo '[HKEY_CURRENT_USER\Software\Wine\Explorer]'
+    echo '"Desktop"="shell"'
+    echo '[HKEY_CURRENT_USER\Software\Wine\Explorer\Desktops]'
+    echo "\"shell\"=\"$(echo "$SCREEN_GEOMETRY" | cut -d x -f 1-2)\""
+    # 崩溃时不弹调试对话框，直接退出，由 supervisord 拉起
+    echo '[HKEY_CURRENT_USER\Software\Wine\WineDbg]'
+    echo '"ShowCrashDialog"=dword:00000000'
+    # 没有声卡，关掉音频驱动，免得日志里全是 ALSA 报错
+    echo '[HKEY_CURRENT_USER\Software\Wine\Drivers]'
+    echo '"Audio"=""'
+    # 窗口标题、任务栏用的是 Windows 系统字体（Tahoma 等），里面没有中文，缺字时链接到 Noto CJK。
+    # 客户端界面本身由 Chromium 渲染，不受影响
+    echo '[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink]'
+    for font in 'Tahoma' 'Tahoma Bold' 'MS Shell Dlg' 'MS Shell Dlg 2' 'Microsoft Sans Serif' 'Segoe UI'; do
+        echo "\"$font\"=$(multi_sz 'NotoSansCJK-Regular.ttc,Noto Sans CJK SC')"
+    done
+} > "$reg"
+wine reg import "Z:$reg" >/dev/null 2>&1 || log "写入 Wine 设置失败，继续启动"
+rm -f "$reg"
+
+# 客户端崩溃时会留下很大的 core dump，关掉
+ulimit -c 0
+# --no-sandbox：Chromium 的沙箱在 Wine 里起不来；--disable-gpu：没有显卡，直接用软件渲染
+# PIKPAK_ARGS 可以给客户端追加启动参数
+# shellcheck disable=SC2086
+exec wine /opt/pikpak/PikPak.exe --no-sandbox --disable-gpu ${PIKPAK_ARGS:-}

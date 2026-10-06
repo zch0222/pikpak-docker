@@ -1,0 +1,5 @@
+# 脚本和配置在 Linux 容器里执行，一律用 LF
+* text=auto eol=lf
+*.exe binary
+*.zip binary
+*.png binary

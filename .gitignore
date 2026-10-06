@@ -1,0 +1,6 @@
+.env
+data/
+vendor/*.exe
+vendor/*.zip
+v2ray/v2ray.json
+*.png
